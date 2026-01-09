@@ -246,7 +246,7 @@ A: 这可能是由于网页结构复杂导致的。解决方案：
 
 ## 十二、联系方式
 
-* GitHub: [yourusername/obsidian-url-clipper](https://github.com/xiaocai12138/obsidian-url-clipper)
+* GitHub: [xiaocai/obsidian-url-clipper](https://github.com/xiaocai12138/obsidian-url-clipper)
 * Issues: [Bug 报告与功能请求](https://github.com/xiaocai12138/obsidian-url-clipper/issues)
 
 ---
