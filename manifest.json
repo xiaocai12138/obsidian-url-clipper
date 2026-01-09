@@ -1,11 +1,9 @@
 {
-	"id": "sample-plugin",
-	"name": "Sample Plugin",
-	"version": "1.0.0",
-	"minAppVersion": "0.15.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
-	"isDesktopOnly": false
+  "id": "url-clipper",
+  "name": "URL Clipper",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "A web clipping plugin for Obsidian with visual content selection, allowing you to precisely clip web page content and generate CSS/XPath selectors.",
+  "author": "you",
+  "isDesktopOnly": true
 }
