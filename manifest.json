@@ -3,7 +3,7 @@
   "name": "URL Clipper",
   "version": "1.0.0",
   "minAppVersion": "1.0.0",
-  "description": "A web clipping plugin for Obsidian with visual content selection, allowing you to precisely clip web page content and generate CSS/XPath selectors.",
-  "author": "you",
+  "description": "URL Clipper 是一款面向 Obsidian 的高级网页剪藏插件，提供网页内容的可视化选择能力。用户可在内嵌网页中精确定位目标元素，通过双击完成选择，并自动生成稳定的 CSS 路径与 XPath 表达式，用于后续网页内容抓取与 Markdown 化处理。",
+  "author": "xiaocai",
   "isDesktopOnly": true
 }

@@ -1,43 +1,49 @@
-import { Notice, Plugin, MarkdownView } from "obsidian";
-import { DEFAULT_SETTINGS, UrlClipperSettings } from "./types";
-import { ClipModal } from "./ui/ClipModal";
-import { UrlClipperSettingTab } from "./settings/UrlClipperSettingTab";
+// src/main.ts
+
+import { Plugin, Notice, MarkdownView } from "obsidian";
+import { registerCommands } from "./commands/registerCommands";
+import { UrlClipperSettings, DEFAULT_SETTINGS } from "./types";
 
 export default class UrlClipperPlugin extends Plugin {
-  settings: UrlClipperSettings = DEFAULT_SETTINGS;
+  settings!: UrlClipperSettings;
 
   async onload() {
     await this.loadSettings();
-
-    this.addCommand({
-      id: "clip-url-to-current-note",
-      name: "剪藏链接到当前笔记（插入到光标处）",
-      callback: () => {
-        const mv = this.getActiveMarkdownView();
-        if (!mv) {
-          new Notice("请先打开一个 Markdown 笔记。");
-          return;
-        }
-        new ClipModal(this.app, this.settings, mv).open();
-      },
-    });
-
-    this.addSettingTab(new UrlClipperSettingTab(this.app, this.settings, async () => {
-      await this.saveSettings();
-    }));
+    registerCommands(this);
+    this.log("Plugin loaded");
   }
 
-  onunload() {}
-
-  private getActiveMarkdownView(): MarkdownView | null {
-    return this.app.workspace.getActiveViewOfType(MarkdownView) ?? null;
+  onunload() {
+    this.log("Plugin unloaded");
   }
 
-  private async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  async loadSettings() {
+    this.settings = Object.assign(
+      {},
+      DEFAULT_SETTINGS,
+      await this.loadData()
+    );
   }
 
-  private async saveSettings() {
+  async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  log(message: string, data?: any) {
+    if (!this.settings?.debug) return;
+    if (data !== undefined) {
+      console.log(`[url-clipper] ${message}`, data);
+    } else {
+      console.log(`[url-clipper] ${message}`);
+    }
+  }
+
+  getActiveMarkdownView(): MarkdownView | null {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    return view ?? null;
+  }
+
+  notice(msg: string) {
+    new Notice(msg);
   }
 }
