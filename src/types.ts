@@ -8,6 +8,10 @@ export interface UrlClipperSettings {
   downloadImages: boolean;
   imagePrefix: string;
   debug: boolean;
+  showResultNotice: boolean;
+  headingLevel1Prefix: string;
+  headingLevel2Prefix: string;
+  headingLevel3Prefix: string;
 }
 
 export const DEFAULT_SETTINGS: UrlClipperSettings = {
@@ -16,21 +20,18 @@ export const DEFAULT_SETTINGS: UrlClipperSettings = {
   downloadImages: true,
   imagePrefix: "",
   debug: true,
+  showResultNotice: true,
+  headingLevel1Prefix: "#",
+  headingLevel2Prefix: "##",
+  headingLevel3Prefix: "###",
 };
 
-/**
- * 统一调试日志输出
- */
-export function log(debug: boolean, ...args: any[]) {
+export function log(debug: boolean, ...args: unknown[]) {
   if (debug) {
-    console.log("[url-clipper]", ...args);
+    console.debug("[url-clipper]", ...args);
   }
 }
 
-/**
- * 生成时间戳：yyyyMMdd-HHmmss-SSS
- * 用于文件名 / 调试标识
- */
 export function tsNow(): string {
   const d = new Date();
   const pad = (n: number, w = 2) => `${n}`.padStart(w, "0");

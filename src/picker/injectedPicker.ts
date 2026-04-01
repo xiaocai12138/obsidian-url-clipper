@@ -83,17 +83,21 @@ export function buildPickerInjectedScript(enable: boolean): string {
 
     const parts = [];
     let cur = el;
-    while (cur && cur.nodeType === 1 && cur !== document.documentElement) {
+    while (cur && cur.nodeType === 1) {
       const tag = cur.tagName.toLowerCase();
       const parent = cur.parentElement;
-      if (!parent) break;
+
+      if (!parent) {
+        parts.unshift(\`/\${tag}[1]\`);
+        break;
+      }
 
       const siblings = Array.from(parent.children).filter(c => c.tagName === cur.tagName);
       const idx = siblings.indexOf(cur) + 1;
       parts.unshift(\`/\${tag}[\${idx}]\`);
       cur = parent;
 
-      if (parts.length >= 12) break;
+      if (parts.length >= 16) break;
     }
     return parts.length ? parts.join('') : '';
   };
@@ -140,8 +144,11 @@ export function buildPickerInjectedScript(enable: boolean): string {
 
     const css = buildCssSelector(el);
     const xpath = buildXPath(el);
+    const html = el.outerHTML || '';
+    const title = (document.title || '').trim();
+    const pageUrl = (typeof location !== 'undefined' && location.href) ? location.href : '';
 
-    window.__URL_CLIPPER_LAST_PICK__ = { css, xpath, ts: Date.now(), reason };
+    window.__URL_CLIPPER_LAST_PICK__ = { css, xpath, html, title, pageUrl, ts: Date.now(), reason };
 
     console.log('[url-clipper][' + reason + ']', { css, xpath });
   };

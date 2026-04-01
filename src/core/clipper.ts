@@ -4,14 +4,57 @@ import { App, MarkdownView, Notice, TFile, requestUrl } from "obsidian";
 import TurndownService from "turndown";
 import { ExtractMode, UrlClipperSettings, log, tsNow } from "../types";
 
-/**
- * 解析 HTML 为 Document（DOMParser）
- */
+type PageFetchResult =
+  | {
+      ok: true;
+      html: string;
+      usedUrl: string;
+      attemptedUrls: string[];
+    }
+  | {
+      ok: false;
+      status?: number;
+      message: string;
+      attemptedUrls: string[];
+    };
+
+interface ImageLocalizationStats {
+  total: number;
+  localized: number;
+  skipped: number;
+  failed: number;
+}
+
+export interface PickerSelectionSnapshot {
+  html: string;
+  title?: string;
+  pageUrl?: string;
+  css?: string;
+  xpath?: string;
+}
+
+function notifyResult(settings: UrlClipperSettings, message: string) {
+  if (settings.showResultNotice) {
+    new Notice(message);
+  }
+}
+
+function reportSuccess(settings: UrlClipperSettings, message: string, details?: Record<string, unknown>) {
+  console.debug("[url-clipper] success:", message, details ?? {});
+  log(settings.debug, "clip success", message, details ?? {});
+  notifyResult(settings, message);
+}
+
+function reportFailure(settings: UrlClipperSettings, message: string, details?: Record<string, unknown>) {
+  console.error("[url-clipper] failure:", message, details ?? {});
+  log(settings.debug, "clip failure", message, details ?? {});
+  notifyResult(settings, message);
+}
+
 function parseHtml(html: string, baseUrl: string): Document {
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, "text/html");
 
-  // 设置 base，方便相对路径解析
   let base = doc.querySelector("base");
   if (!base) {
     base = doc.createElement("base");
@@ -22,9 +65,131 @@ function parseHtml(html: string, baseUrl: string): Document {
   return doc;
 }
 
-/**
- * auto 模式：<article>/<main> 优先，否则“最大文本块”
- */
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function stripTrackingParams(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    const removeKeys = new Set(["spm", "from", "source", "sharefrom", "share_to"]);
+
+    for (const key of Array.from(parsed.searchParams.keys())) {
+      const lower = key.toLowerCase();
+      if (removeKeys.has(lower) || lower.startsWith("utm_")) {
+        parsed.searchParams.delete(key);
+      }
+    }
+
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+function buildCandidatePageUrls(rawUrl: string): string[] {
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+
+  const push = (value: string) => {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  push(rawUrl);
+  push(stripTrackingParams(rawUrl));
+
+  try {
+    const parsed = new URL(rawUrl);
+    const csdnSubdomain = parsed.hostname.match(/^([^.]+)\.blog\.csdn\.net$/i);
+
+    if (csdnSubdomain && csdnSubdomain[1]) {
+      const author = csdnSubdomain[1];
+      const canonical = new URL(`https://blog.csdn.net/${author}${parsed.pathname}`);
+      canonical.search = "";
+      canonical.hash = "";
+      push(canonical.toString());
+      push(stripTrackingParams(canonical.toString()));
+    }
+  } catch {
+    // ignore URL parse failures
+  }
+
+  return candidates;
+}
+
+function buildPageRequestHeaders(targetUrl: string): Record<string, string> {
+  let referer = "https://www.google.com/";
+  try {
+    const parsed = new URL(targetUrl);
+    referer = `${parsed.protocol}//${parsed.host}/`;
+  } catch {
+    // keep fallback referer
+  }
+
+  return {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    Referer: referer,
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+  };
+}
+
+async function fetchPageHtmlWithFallback(
+  settings: UrlClipperSettings,
+  rawUrl: string
+): Promise<PageFetchResult> {
+  const candidates = buildCandidatePageUrls(rawUrl);
+  let lastStatus: number | undefined;
+  let lastMessage = "";
+
+  for (const candidate of candidates) {
+    try {
+      log(settings.debug, "fetch candidate", candidate);
+      const res = await requestUrl({
+        url: candidate,
+        method: "GET",
+        headers: buildPageRequestHeaders(candidate),
+      });
+
+      if (res.status < 400 && res.text.trim()) {
+        if (candidate !== rawUrl) {
+          log(settings.debug, "fetch succeeded via fallback url", {
+            requested: rawUrl,
+            used: candidate,
+          });
+        }
+        return { ok: true, html: res.text, usedUrl: candidate, attemptedUrls: candidates };
+      }
+
+      lastStatus = res.status;
+      lastMessage = `HTTP ${res.status}`;
+      log(settings.debug, "fetch failed by status", { candidate, status: res.status });
+    } catch (error: unknown) {
+      lastMessage = getErrorMessage(error);
+      const statusMatch = lastMessage.match(/status\s+(\d{3})/i);
+      if (statusMatch?.[1]) {
+        const code = Number(statusMatch[1]);
+        if (!Number.isNaN(code)) lastStatus = code;
+      }
+      log(settings.debug, "fetch threw exception", { candidate, error: lastMessage });
+    }
+  }
+
+  return {
+    ok: false,
+    status: lastStatus,
+    message: lastMessage || "unknown error",
+    attemptedUrls: candidates,
+  };
+}
+
 function extractAuto(doc: Document): Element | null {
   const article = doc.querySelector("article");
   if (article) return article;
@@ -32,7 +197,7 @@ function extractAuto(doc: Document): Element | null {
   const main = doc.querySelector("main");
   if (main) return main;
 
-  const candidates = Array.from(doc.querySelectorAll("div, section, body")) as Element[];
+  const candidates = Array.from(doc.querySelectorAll("div, section, body"));
 
   let best: Element | null = null;
   let bestLen = 0;
@@ -49,8 +214,7 @@ function extractAuto(doc: Document): Element | null {
       continue;
     }
 
-    const text = (el.textContent || "").trim();
-    const len = text.length;
+    const len = (el.textContent || "").trim().length;
     if (len > bestLen) {
       bestLen = len;
       best = el;
@@ -61,35 +225,171 @@ function extractAuto(doc: Document): Element | null {
 }
 
 function extractByCss(doc: Document, selector: string): Element | null {
-  if (!selector.trim()) return null;
-  return doc.querySelector(selector.trim());
+  const s = selector.trim();
+  if (!s) return null;
+  return doc.querySelector(s);
 }
 
-function extractByXpath(doc: Document, xpath: string): Element | null {
-  const xp = xpath.trim();
-  if (!xp) return null;
-
+function evaluateFirstElementByXpath(doc: Document, xpath: string): Element | null {
   try {
-    const res = doc.evaluate(
-      xp,
-      doc,
-      null,
-      XPathResult.FIRST_ORDERED_NODE_TYPE,
-      null
-    );
+    const res = doc.evaluate(xpath, doc, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
     const node = res.singleNodeValue;
-    if (node && node.nodeType === Node.ELEMENT_NODE) return node as Element;
+    if (node instanceof Element) return node;
     return null;
   } catch {
     return null;
   }
 }
 
-function htmlToMarkdown(html: string): string {
+function buildXpathCandidates(xpath: string): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+
+  const push = (value: string) => {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  push(xpath);
+
+  if (xpath.startsWith("/body")) {
+    push(`/html[1]${xpath}`);
+  }
+  if (xpath.startsWith("/") && !xpath.startsWith("/html")) {
+    push(`/html[1]${xpath}`);
+  }
+  if (xpath.startsWith("/html/")) {
+    push(xpath.replace(/^\/html\//, "/html[1]/"));
+  }
+
+  const bodyPath = xpath.match(/^\/body(?:\[\d+\])?(\/.*)$/);
+  if (bodyPath && bodyPath[1]) {
+    push(`//body${bodyPath[1]}`);
+  }
+
+  const tailTag = xpath.match(/\/([a-zA-Z][\w-]*)(?:\[\d+\])?$/);
+  if (tailTag && tailTag[1]) {
+    push(`//${tailTag[1]}`);
+  }
+
+  return candidates;
+}
+
+function extractByXpath(doc: Document, xpath: string): Element | null {
+  const xp = xpath.trim();
+  if (!xp) return null;
+
+  for (const candidate of buildXpathCandidates(xp)) {
+    const matched = evaluateFirstElementByXpath(doc, candidate);
+    if (matched) return matched;
+  }
+
+  return null;
+}
+
+function escapeTableCell(text: string): string {
+  return text.replace(/\r?\n+/g, "<br>").replace(/\|/g, "\\|").trim();
+}
+
+function buildMarkdownTable(table: HTMLTableElement): string {
+  const rows = Array.from(table.querySelectorAll("tr"));
+  if (!rows.length) return "";
+
+  const toCells = (row: HTMLTableRowElement): string[] => {
+    const cells = Array.from(row.cells);
+    return cells.map((cell) => escapeTableCell(cell.textContent || ""));
+  };
+
+  let headerCells: string[] = [];
+  let dataRows: HTMLTableRowElement[] = [];
+
+  const theadRow = table.querySelector("thead tr");
+  if (theadRow instanceof HTMLTableRowElement) {
+    headerCells = toCells(theadRow);
+    dataRows = rows.filter((row) => row !== theadRow);
+  } else {
+    const firstRow = rows[0];
+    if (!firstRow) return "";
+    headerCells = toCells(firstRow);
+    dataRows = rows.slice(1);
+  }
+
+  const columnCount = Math.max(
+    headerCells.length,
+    ...dataRows.map((row) => row.cells.length),
+    1
+  );
+
+  while (headerCells.length < columnCount) headerCells.push("");
+  const separator = new Array(columnCount).fill("---");
+
+  const lines = [
+    `| ${headerCells.join(" | ")} |`,
+    `| ${separator.join(" | ")} |`,
+  ];
+
+  for (const row of dataRows) {
+    const cells = toCells(row);
+    while (cells.length < columnCount) cells.push("");
+    lines.push(`| ${cells.join(" | ")} |`);
+  }
+
+  return lines.join("\n");
+}
+
+function resolveHeadingPrefix(settings: UrlClipperSettings, level: number): string {
+  if (level === 1) return settings.headingLevel1Prefix.trim() || "#";
+  if (level === 2) return settings.headingLevel2Prefix.trim() || "##";
+  if (level === 3) return settings.headingLevel3Prefix.trim() || "###";
+  return "#".repeat(level);
+}
+
+function detectHeadingLevelShift(html: string): number {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, "text/html");
+  const headings = Array.from(doc.querySelectorAll("h1, h2, h3, h4, h5, h6"));
+  if (!headings.length) return 0;
+
+  let minLevel = 7;
+  for (const heading of headings) {
+    const level = Number(heading.tagName.charAt(1));
+    if (level >= 1 && level <= 6 && level < minLevel) {
+      minLevel = level;
+    }
+  }
+
+  if (minLevel > 1 && minLevel <= 6) {
+    return minLevel - 1;
+  }
+  return 0;
+}
+
+function normalizeMarkdown(md: string, settings: UrlClipperSettings): string {
+  let output = md.replace(/\r\n/g, "\n");
+
+  // Keep section titles stable: "# 2. xxx" instead of "# 2\\. xxx"
+  output = output.replace(/^(#{1,6}\s+)(\d+)\\\.\s+/gm, (_m, prefix: string, num: string) => {
+    return `${prefix}${num}. `;
+  });
+
+  // Fallback: if an isolated line becomes "2\\. 标题", promote it to H1.
+  const level1Prefix = resolveHeadingPrefix(settings, 1);
+  output = output.replace(
+    /(^|\n\n)(\d+)\\\.\s+([^\n]+)(?=\n\n|$)/g,
+    (_m, pre: string, num: string, title: string) => `${pre}${level1Prefix} ${num}. ${title}`
+  );
+
+  return output;
+}
+
+function htmlToMarkdown(html: string, settings: UrlClipperSettings): string {
   const td = new TurndownService({
     codeBlockStyle: "fenced",
     emDelimiter: "*",
   });
+  const headingShift = detectHeadingLevelShift(html);
 
   td.addRule("pre", {
     filter: (node) => node.nodeName === "PRE",
@@ -101,15 +401,35 @@ function htmlToMarkdown(html: string): string {
     },
   });
 
-  return td.turndown(html);
+  td.addRule("heading", {
+    filter: ["h1", "h2", "h3", "h4", "h5", "h6"],
+    replacement: (content, node) => {
+      const rawLevel = Number(node.nodeName.charAt(1)) || 1;
+      const level = Math.max(1, rawLevel - headingShift);
+      const clean = content.replace(/\n+/g, " ").replace(/\\\./g, ".").trim();
+      const prefix = resolveHeadingPrefix(settings, level);
+      return `\n\n${prefix} ${clean}\n\n`;
+    },
+  });
+
+  td.addRule("table", {
+    filter: (node) => node.nodeName === "TABLE",
+    replacement: (_content, node) => {
+      const table = node as HTMLTableElement;
+      const markdownTable = buildMarkdownTable(table);
+      if (!markdownTable) return "\n\n";
+      return `\n\n${markdownTable}\n\n`;
+    },
+  });
+
+  return normalizeMarkdown(td.turndown(html), settings);
 }
 
 function guessImageExt(url: string): string {
   const u = url.toLowerCase();
   const m = u.match(/\.(png|jpg|jpeg|webp|gif|svg)(\?.*)?$/i);
   if (m && m[1]) {
-    const ext = m[1].toLowerCase().replace("jpeg", "jpg");
-    return ext;
+    return m[1].toLowerCase().replace("jpeg", "jpg");
   }
   return "png";
 }
@@ -126,7 +446,7 @@ async function ensureParentFolder(app: App, path: string) {
 }
 
 async function getAttachmentPathForImage(app: App, activeFile: TFile, filename: string) {
-  return await app.fileManager.getAvailablePathForAttachment(filename, activeFile.path);
+  return app.fileManager.getAvailablePathForAttachment(filename, activeFile.path);
 }
 
 async function downloadImageToVault(
@@ -156,17 +476,17 @@ async function downloadImageToVault(
     });
 
     if (res.status >= 400) {
-      log(settings.debug, "图片下载失败（HTTP）", cleanUrl, res.status);
+      log(settings.debug, "image download failed", { url: cleanUrl, status: res.status });
       return null;
     }
 
-    const data = res.arrayBuffer as ArrayBuffer;
-    await app.vault.createBinary(vaultPath, data);
-
-    log(settings.debug, "图片已保存到 vault:", vaultPath, "from", cleanUrl);
+    await app.vault.createBinary(vaultPath, res.arrayBuffer as ArrayBuffer);
     return vaultPath;
-  } catch (e: any) {
-    log(settings.debug, "图片下载失败（异常）", cleanUrl, e?.message || e);
+  } catch (error: unknown) {
+    log(settings.debug, "image download threw", {
+      url: cleanUrl,
+      error: getErrorMessage(error),
+    });
     return null;
   }
 }
@@ -177,84 +497,151 @@ async function localizeImagesInElement(
   el: Element,
   pageUrl: string,
   activeFile: TFile
-): Promise<void> {
+): Promise<ImageLocalizationStats> {
   const imgs = Array.from(el.querySelectorAll("img"));
-  if (!imgs.length) return;
+  const stats: ImageLocalizationStats = {
+    total: imgs.length,
+    localized: 0,
+    skipped: 0,
+    failed: 0,
+  };
 
   for (const imgEl of imgs) {
     const raw = (imgEl.getAttribute("src") ?? "").trim();
-    if (!raw) continue;
-
-    if (raw.startsWith("data:") || raw.startsWith("blob:")) continue;
+    if (!raw || raw.startsWith("data:") || raw.startsWith("blob:")) {
+      stats.skipped += 1;
+      continue;
+    }
 
     let absUrl = "";
     try {
       absUrl = new URL(raw, pageUrl).toString();
     } catch {
+      stats.skipped += 1;
       continue;
     }
 
     const vaultPath = await downloadImageToVault(app, settings, activeFile, absUrl);
-    if (!vaultPath) continue;
+    if (!vaultPath) {
+      stats.failed += 1;
+      continue;
+    }
 
     imgEl.setAttribute("src", vaultPath);
+    stats.localized += 1;
   }
+
+  return stats;
 }
 
-/**
- * 对外暴露的核心剪藏入口
- */
 export async function clipAndInsertToCursor(
   app: App,
   settings: UrlClipperSettings,
   url: string,
   mode: ExtractMode,
   contentPath: string,
-  markdownView: MarkdownView
+  markdownView: MarkdownView,
+  pickerSnapshot?: PickerSelectionSnapshot
 ) {
   const activeFile = markdownView.file;
   if (!activeFile) {
-    new Notice("当前笔记未保存到文件，无法写入图片附件。请先保存。");
+    reportFailure(settings, "剪藏失败：当前笔记未保存，无法写入图片附件。", { url, mode });
     return;
   }
 
-  log(settings.debug, "开始剪藏:", { url, mode, contentPath });
+  console.debug("[url-clipper] start clip", { url, mode, contentPath });
+  log(settings.debug, "start clip", { url, mode, contentPath });
 
-  let html = "";
-  try {
-    const res = await requestUrl({ url, method: "GET" });
-    if (res.status >= 400) {
-      new Notice(`请求失败：HTTP ${res.status}`);
+  let picked: Element | null = null;
+  let title = "";
+  let sourceFetchUrl = url;
+  let attempts: string[] = [];
+  const canUseSnapshot = mode !== "auto" && Boolean(pickerSnapshot?.html?.trim());
+
+  if (canUseSnapshot && pickerSnapshot) {
+    const snapshotUrl = (pickerSnapshot.pageUrl || url).trim();
+    const snapshotDoc = parseHtml(pickerSnapshot.html, snapshotUrl);
+    picked = snapshotDoc.body.firstElementChild ?? snapshotDoc.body;
+    title = (pickerSnapshot.title || "").trim();
+    sourceFetchUrl = snapshotUrl;
+    attempts = ["picker-snapshot"];
+    log(settings.debug, "using picker snapshot html", {
+      mode,
+      contentPath,
+      snapshotUrl,
+      css: pickerSnapshot.css,
+      xpath: pickerSnapshot.xpath,
+      htmlLength: pickerSnapshot.html.length,
+    });
+  } else {
+    const fetched = await fetchPageHtmlWithFallback(settings, url);
+    if (!fetched.ok) {
+      const message =
+        fetched.status === 521
+          ? "剪藏失败：HTTP 521（站点拒绝连接），已尝试备用地址。"
+          : fetched.status
+            ? `剪藏失败：HTTP ${fetched.status}`
+            : `剪藏失败：${fetched.message}`;
+
+      reportFailure(settings, message, {
+        url,
+        mode,
+        attempts: fetched.attemptedUrls,
+        error: fetched.message,
+      });
       return;
     }
-    html = res.text;
-  } catch (e: any) {
-    new Notice(`请求失败：${e?.message || e}`);
+
+    const doc = parseHtml(fetched.html, fetched.usedUrl);
+    if (mode === "auto") picked = extractAuto(doc);
+    else if (mode === "css") picked = extractByCss(doc, contentPath);
+    else picked = extractByXpath(doc, contentPath);
+    title = (doc.querySelector("title")?.textContent || "").trim();
+    sourceFetchUrl = fetched.usedUrl;
+    attempts = fetched.attemptedUrls;
+  }
+
+  if (!picked) {
+    reportFailure(settings, "剪藏失败：未找到正文区域，请调整 CSS/XPath 后重试。", {
+      url,
+      mode,
+      contentPath,
+      fetchUrl: sourceFetchUrl,
+      usedSnapshot: canUseSnapshot,
+    });
     return;
   }
 
-  const doc = parseHtml(html, url);
-
-  let el: Element | null = null;
-  if (mode === "auto") el = extractAuto(doc);
-  else if (mode === "css") el = extractByCss(doc, contentPath);
-  else el = extractByXpath(doc, contentPath);
-
-  if (!el) {
-    new Notice("未找到正文区域。请使用 CSS/XPath 选择模式指定正文。");
-    return;
-  }
-
+  let imageStats: ImageLocalizationStats = {
+    total: 0,
+    localized: 0,
+    skipped: 0,
+    failed: 0,
+  };
   if (settings.downloadImages) {
-    await localizeImagesInElement(app, settings, el, url, activeFile);
+    imageStats = await localizeImagesInElement(app, settings, picked, sourceFetchUrl, activeFile);
   }
 
-  const title = (doc.querySelector("title")?.textContent || "").trim();
-  const header = ["", `> 来源：${title ? title + " - " : ""}${url}`, ""].join("\n");
-  const md = header + htmlToMarkdown(el.outerHTML).trimEnd() + "\n\n";
+  const header = ["", `> 来源：${title ? `${title} - ` : ""}${url}`, ""].join("\n");
+  const md = `${header}${htmlToMarkdown(picked.outerHTML, settings).trimEnd()}\n\n`;
 
   const editor = markdownView.editor;
   editor.replaceRange(md, editor.getCursor());
 
-  new Notice("剪藏完成：已插入到当前光标位置。");
+  const contentLength = (picked.textContent || "").trim().length;
+  const successMessage =
+    settings.downloadImages
+      ? `剪藏成功：模式=${mode}，正文字符≈${contentLength}，图片本地化=${imageStats.localized}/${imageStats.total}`
+      : `剪藏成功：模式=${mode}，正文字符≈${contentLength}`;
+
+  reportSuccess(settings, successMessage, {
+    url,
+    mode,
+    contentPath,
+    fetchUrl: sourceFetchUrl,
+    attempts,
+    usedSnapshot: canUseSnapshot,
+    contentLength,
+    imageStats,
+  });
 }

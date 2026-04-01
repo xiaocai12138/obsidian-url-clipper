@@ -1,14 +1,18 @@
 // src/main.ts
 
-import { Plugin, Notice, MarkdownView } from "obsidian";
+import { MarkdownView, Notice, Plugin } from "obsidian";
 import { registerCommands } from "./commands/registerCommands";
-import { UrlClipperSettings, DEFAULT_SETTINGS } from "./types";
+import { UrlClipperSettingTab } from "./settings/UrlClipperSettingTab";
+import { DEFAULT_SETTINGS, UrlClipperSettings } from "./types";
 
 export default class UrlClipperPlugin extends Plugin {
   settings!: UrlClipperSettings;
 
   async onload() {
     await this.loadSettings();
+    this.addSettingTab(
+      new UrlClipperSettingTab(this.app, this, this.settings, () => this.saveSettings())
+    );
     registerCommands(this);
     this.log("Plugin loaded");
   }
@@ -18,23 +22,20 @@ export default class UrlClipperPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign(
-      {},
-      DEFAULT_SETTINGS,
-      await this.loadData()
-    );
+    const saved = (await this.loadData()) as Partial<UrlClipperSettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved ?? {});
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
   }
 
-  log(message: string, data?: any) {
+  log(message: string, data?: unknown) {
     if (!this.settings?.debug) return;
     if (data !== undefined) {
-      console.log(`[url-clipper] ${message}`, data);
+      console.debug(`[url-clipper] ${message}`, data);
     } else {
-      console.log(`[url-clipper] ${message}`);
+      console.debug(`[url-clipper] ${message}`);
     }
   }
 

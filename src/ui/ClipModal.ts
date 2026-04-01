@@ -1,9 +1,9 @@
 // src/ui/ClipModal.ts
 
-import { App, Modal, Notice, Setting, MarkdownView } from "obsidian";
+import { App, MarkdownView, Modal, Notice, Setting } from "obsidian";
+import { clipAndInsertToCursor, PickerSelectionSnapshot } from "../core/clipper";
 import { ExtractMode, UrlClipperSettings } from "../types";
 import { PickerModal } from "./PickerModal";
-import { clipAndInsertToCursor } from "../core/clipper";
 
 export class ClipModal extends Modal {
   private settings: UrlClipperSettings;
@@ -16,6 +16,8 @@ export class ClipModal extends Modal {
   private contentPathRow!: HTMLDivElement;
   private contentPathInput!: HTMLInputElement;
   private pickBtn!: HTMLButtonElement;
+
+  private pickerSnapshot: PickerSelectionSnapshot | null = null;
 
   constructor(app: App, settings: UrlClipperSettings, mv: MarkdownView) {
     super(app);
@@ -34,6 +36,9 @@ export class ClipModal extends Modal {
       .addText((t) => {
         this.urlInput = t.inputEl;
         t.setPlaceholder("https://...");
+        this.urlInput.addEventListener("input", () => {
+          this.pickerSnapshot = null;
+        });
       });
 
     new Setting(contentEl)
@@ -42,9 +47,8 @@ export class ClipModal extends Modal {
       .addDropdown((dd) => {
         this.modeSelect = dd.selectEl;
         dd.addOption("auto", "自动（智能提取）");
-        dd.addOption("css", "CSS 选择器（点击选取）");
-        dd.addOption("xpath", "XPath（点击选取）");
-
+        dd.addOption("css", "CSS 选择器（点选生成）");
+        dd.addOption("xpath", "XPath");
         dd.setValue(this.settings.defaultMode);
         dd.onChange(() => this.refreshContentPathUi());
       });
@@ -78,13 +82,20 @@ export class ClipModal extends Modal {
 
       const mode = (this.modeSelect.value as ExtractMode) || "auto";
       const path = (this.contentPathInput.value || "").trim();
-
       if ((mode === "css" || mode === "xpath") && !path) {
-        new Notice("请先选择正文区域（生成 CSS/XPath 路径）。");
+        new Notice("请先选择正文区域。");
         return;
       }
 
-      await clipAndInsertToCursor(this.app, this.settings, url, mode, path, this.mv);
+      await clipAndInsertToCursor(
+        this.app,
+        this.settings,
+        url,
+        mode,
+        path,
+        this.mv,
+        this.pickerSnapshot ?? undefined
+      );
       this.close();
     };
 
@@ -98,12 +109,14 @@ export class ClipModal extends Modal {
   private refreshContentPathUi() {
     const mode = this.modeSelect?.value as ExtractMode;
     const show = mode === "css" || mode === "xpath";
-
     this.contentPathLabel.style.display = show ? "" : "none";
     this.contentPathRow.style.display = show ? "" : "none";
     this.pickBtn.style.display = show ? "" : "none";
 
-    if (!show) this.contentPathInput.value = "";
+    if (!show) {
+      this.contentPathInput.value = "";
+      this.pickerSnapshot = null;
+    }
   }
 
   private openPicker() {
@@ -117,7 +130,24 @@ export class ClipModal extends Modal {
     const pickerMode: "css" | "xpath" = mode === "xpath" ? "xpath" : "css";
 
     new PickerModal(this.app, this.settings, url, pickerMode, (picked) => {
-      this.contentPathInput.value = pickerMode === "css" ? (picked.css || "") : (picked.xpath || "");
+      this.contentPathInput.value = pickerMode === "css" ? picked.css || "" : picked.xpath || "";
+
+      this.pickerSnapshot = {
+        html: picked.html || "",
+        title: picked.title,
+        pageUrl: picked.pageUrl,
+        css: picked.css || "",
+        xpath: picked.xpath || "",
+      };
+
+      if (this.settings.debug) {
+        console.debug("[url-clipper] 已保存选择器快照", {
+          hasHtml: Boolean(this.pickerSnapshot.html),
+          css: this.pickerSnapshot.css,
+          xpath: this.pickerSnapshot.xpath,
+          pageUrl: this.pickerSnapshot.pageUrl,
+        });
+      }
     }).open();
   }
 
